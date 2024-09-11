@@ -12,7 +12,7 @@ WORKDIR /usr/app
 
 COPY package*.json ./
 
-RUN npm ci --only=production
+RUN npm ci --include=prod
 
 COPY --chown=node:node . .
 

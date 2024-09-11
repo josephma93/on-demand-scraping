@@ -74,11 +74,20 @@ async function captureContainerResultFromLogs(container) {
             let stdoutData = '';
 
             stdoutStream.on('data', (data) => {
-                stdoutData += data.toString();
+                const chunk = data.toString();
+                if (stdoutData === '') {
+                    // start appending when special indicator is found
+                    if (chunk.includes('⇉')) {
+                        stdoutData += chunk.split('⇉')[1];
+                    }
+                } else {
+                    // after the indicator is found, append the rest
+                    stdoutData += chunk;
+                }
             });
 
             stdoutStream.on('end', () => {
-                resolve(stdoutData);
+                resolve(stdoutData.trim());
             });
 
             stdoutStream.on('error', (err) => {
@@ -137,14 +146,10 @@ async function runDockerCommand(jobParams) {
     // The following commands will run using bash inside the container.
     // All commands will be executed by the `pptruser` user according to: https://github.com/puppeteer/puppeteer/blob/main/docker/Dockerfile
     const commandParts = [
-        // Create work directory
-        'mkdir -p /home/pptruser/workdir',
-        // Copy files from volume to work directory, this makes them reachable inside the container
-        'cp -r /home/pptruser/app/{.,}* /home/pptruser/workdir/',
-        // Change directory to work directory
-        'cd /home/pptruser/workdir',
+        // Change directory to the one mounted by volume
+        'cd /home/pptruser/app',
         // Install dependencies
-        'npm ci',
+        'npm ci --no-audit --include=prod',
         // Run the Puppeteer script using standard interface
         `node app.mjs`,
     ];
@@ -175,7 +180,9 @@ function validateParams(params) {
     function isValidPartialPath(userInputPath) {
         try {
             const realBaseDir = fs.realpathSync(BASE_PATH_FOR_SCRIPTS);
-            const realResolvedPath = fs.realpathSync(path.resolve(BASE_PATH_FOR_SCRIPTS, userInputPath));
+            const resolvedPath = path.resolve(BASE_PATH_FOR_SCRIPTS, userInputPath);
+            const realResolvedPath = fs.realpathSync(resolvedPath);
+            logger.debug({ realResolvedPath }, 'Resolved path');
             return realResolvedPath.startsWith(realBaseDir);
         } catch (err) {
             return false;
@@ -212,9 +219,11 @@ async function startScrapperJob(req, res) {
     }
 
     try {
-        const result = await runDockerCommand(params);
+        const result = await runDockerCommand({
+            programDirectory: fs.realpathSync(path.resolve(BASE_PATH_FOR_SCRIPTS, params.programDirectory)),
+        });
         logger.info('Scrapper job completed successfully');
-        return res.status(200).json(result);
+        return res.status(200).type('application/json').send(result);
     } catch (err) {
         logger.error({ err }, 'Failed to execute Docker command');
         return res.status(500).json({ status: 'error', message: `Puppeteer script execution failed: ${err.message}` });
