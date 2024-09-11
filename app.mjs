@@ -5,14 +5,19 @@ import * as fs from 'node:fs';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
 
-// Constants and environment configurations
 const BASE_PATH_FOR_SCRIPTS = path.resolve(process.env.APP_PATH_FOR_SCRIPTS);
 const IS_DEBUG_ON = process.env.APP_IS_DEBUG_ON === 'true';
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
-// Set up Pino logger
 const logger = pino({
     level: IS_DEBUG_ON ? 'debug' : 'info',
+    formatters: {
+        level(label) {
+            return { level: label };
+        }
+    },
+    base: null,
+    timestamp: pino.stdTimeFunctions.isoTime,
 });
 
 const app = express();
@@ -27,12 +32,6 @@ docker.ping()
         logger.error({ err }, 'Docker ping error');
         process.exit(1);
     });
-
-function publishFeedback(status, message) {
-    const feedback = { status, message };
-    logger.info({ feedback }, 'Publishing feedback');
-    // TODO: do something with feedback
-}
 
 async function createDockerContainer(jobConfig) {
     try {
@@ -97,9 +96,7 @@ async function waitForContainerToFinish(container) {
     const data = await container.wait();
     logger.debug('Docker container exited', { statusCode: data.StatusCode });
 
-    if (data.StatusCode === 0) {
-        publishFeedback('info', 'Puppeteer script executed successfully.');
-    } else {
+    if (data.StatusCode !== 0) {
         const errorMsg = `Puppeteer script execution failed with exit code ${data.StatusCode}`;
         logger.error(errorMsg);
         throw new Error(errorMsg);
@@ -113,7 +110,6 @@ function handleImageNotFoundThenRetry(jobParams) {
         function onFinished(err) {
             if (err) {
                 logger.error({ err }, 'Error pulling Docker image');
-                publishFeedback('error', `Failed to pull Docker image: ${err.message}`);
                 return reject(err);
             }
             resolve(runDockerCommand(jobParams));
