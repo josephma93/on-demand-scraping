@@ -7,13 +7,13 @@ import pinoHttp from 'pino-http';
 
 const BASE_PATH_FOR_SCRIPTS = path.resolve(process.env.APP_PATH_FOR_SCRIPTS);
 const IS_DEBUG_ON = process.env.APP_IS_DEBUG_ON === 'true';
-const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+const docker = new Docker({socketPath: '/var/run/docker.sock'});
 
 const logger = pino({
     level: IS_DEBUG_ON ? 'debug' : 'info',
     formatters: {
         level(label) {
-            return { level: label };
+            return {level: label};
         }
     },
     base: null,
@@ -22,19 +22,20 @@ const logger = pino({
 
 const app = express();
 app.use(express.json());
-app.use(pinoHttp({ logger }));
+app.use(pinoHttp({logger}));
 
 docker.ping()
     .then(() => {
         logger.info('Connected to Docker');
     })
     .catch((err) => {
-        logger.error({ err }, 'Docker ping error');
+        logger.error({err}, 'Docker ping error');
         process.exit(1);
     });
 
 async function createDockerContainer(jobConfig) {
     try {
+        logger.debug(jobConfig, 'Creating Docker container');
         const container = await docker.createContainer({
             Image: 'ghcr.io/puppeteer/puppeteer:22.10.0',
             Cmd: ['bash', '-c', jobConfig.bashStartUpCmd],
@@ -45,10 +46,10 @@ async function createDockerContainer(jobConfig) {
                 CapAdd: ['SYS_ADMIN'],
             },
         });
-        logger.debug('Docker container created', { jobConfig });
+        logger.debug('Docker container created', {jobConfig});
         return container;
     } catch (err) {
-        logger.error({ err }, 'Error creating Docker container');
+        logger.error({err}, 'Error creating Docker container');
         throw err;
     }
 }
@@ -64,8 +65,8 @@ async function captureContainerResultFromLogs(container) {
             stdoutStream,
             stderrStream,
         ] = await Promise.all([
-            container.attach({ stream: true, stdout: true, stderr: false, logs: true }),
-            container.attach({ stream: true, stdout: false, stderr: true, logs: true }),
+            container.attach({stream: true, stdout: true, stderr: false, logs: true}),
+            container.attach({stream: true, stdout: false, stderr: true, logs: true}),
         ]);
 
         stderrStream.pipe(process.stderr);
@@ -91,19 +92,19 @@ async function captureContainerResultFromLogs(container) {
             });
 
             stdoutStream.on('error', (err) => {
-                logger.error({ err }, 'Error collecting stdout logs');
+                logger.error({err}, 'Error collecting stdout logs');
                 reject(err);
             });
         });
     } catch (err) {
-        logger.error({ err }, 'Error attaching to Docker container streams');
+        logger.error({err}, 'Error attaching to Docker container streams');
         throw err;
     }
 }
 
 async function waitForContainerToFinish(container) {
     const data = await container.wait();
-    logger.debug('Docker container exited', { statusCode: data.StatusCode });
+    logger.debug('Docker container exited', {statusCode: data.StatusCode});
 
     if (data.StatusCode !== 0) {
         const errorMsg = `Puppeteer script execution failed with exit code ${data.StatusCode}`;
@@ -118,14 +119,14 @@ function handleImageNotFoundThenRetry(jobParams) {
     return new Promise(async function pullAndRetry(resolve, reject) {
         function onFinished(err) {
             if (err) {
-                logger.error({ err }, 'Error pulling Docker image');
+                logger.error({err}, 'Error pulling Docker image');
                 return reject(err);
             }
             resolve(runDockerCommand(jobParams));
         }
 
         function onProgress(event) {
-            logger.debug('Docker pull progress', { event });
+            logger.debug('Docker pull progress', {event});
         }
 
         try {
@@ -136,7 +137,7 @@ function handleImageNotFoundThenRetry(jobParams) {
                 docker.modem.followProgress(stream, onFinished, onProgress);
             });
         } catch (err) {
-            logger.error({ err }, 'Error during Docker pull');
+            logger.error({err}, 'Error during Docker pull');
             reject(err);
         }
     });
@@ -170,7 +171,7 @@ async function runDockerCommand(jobParams) {
         if (err.statusCode === 404 && err.json && err.json.message.includes('No such image')) {
             return await handleImageNotFoundThenRetry(jobConfig);
         } else {
-            logger.error({ err }, 'Error running Docker command');
+            logger.error({err}, 'Error running Docker command');
             throw err;
         }
     }
@@ -178,15 +179,12 @@ async function runDockerCommand(jobParams) {
 
 function validateParams(params) {
     function isValidPartialPath(userInputPath) {
-        try {
-            const realBaseDir = fs.realpathSync(BASE_PATH_FOR_SCRIPTS);
-            const resolvedPath = path.resolve(BASE_PATH_FOR_SCRIPTS, userInputPath);
-            const realResolvedPath = fs.realpathSync(resolvedPath);
-            logger.debug({ realResolvedPath }, 'Resolved path');
-            return realResolvedPath.startsWith(realBaseDir);
-        } catch (err) {
-            return false;
-        }
+        logger.debug({userInputPath}, 'Validating path');
+        const sanitizedPath = userInputPath.replace(/(\.\.|~|\/\/)/g, '');
+        logger.debug({sanitizedPath}, 'Sanitized path');
+        const resolvedPath = path.resolve(BASE_PATH_FOR_SCRIPTS, sanitizedPath);
+        logger.debug({resolvedPath}, 'Resolved path');
+        return resolvedPath.startsWith(BASE_PATH_FOR_SCRIPTS);
     }
 
     let error;
@@ -205,28 +203,28 @@ function validateParams(params) {
         }
     }
 
-    return { isValid: !error, error };
+    return {isValid: !error, error};
 }
 
 async function startScrapperJob(req, res) {
     const params = req.body;
-    logger.info('Received HTTP request', { params });
+    logger.info('Received HTTP request', {params});
 
     const validationResult = validateParams(params);
     if (!validationResult.isValid) {
-        logger.warn('Validation failed', { error: validationResult.error });
-        return res.status(400).json({ status: 'error', message: validationResult.error });
+        logger.warn('Validation failed', {error: validationResult.error});
+        return res.status(400).json({status: 'error', message: validationResult.error});
     }
 
     try {
         const result = await runDockerCommand({
-            programDirectory: fs.realpathSync(path.resolve(BASE_PATH_FOR_SCRIPTS, params.programDirectory)),
+            programDirectory: path.resolve(BASE_PATH_FOR_SCRIPTS, params.programDirectory),
         });
         logger.info('Scrapper job completed successfully');
         return res.status(200).type('application/json').send(result);
     } catch (err) {
-        logger.error({ err }, 'Failed to execute Docker command');
-        return res.status(500).json({ status: 'error', message: `Puppeteer script execution failed: ${err.message}` });
+        logger.error({err}, 'Failed to execute Docker command');
+        return res.status(500).json({status: 'error', message: `Puppeteer script execution failed: ${err.message}`});
     }
 }
 
