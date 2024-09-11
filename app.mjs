@@ -1,54 +1,61 @@
 import Docker from 'dockerode';
 import express from 'express';
-import * as path from "node:path";
-import * as fs from "node:fs";
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import pino from 'pino';
+import pinoHttp from 'pino-http';
 
+// Constants and environment configurations
 const BASE_PATH_FOR_SCRIPTS = path.resolve(process.env.APP_PATH_FOR_SCRIPTS);
 const IS_DEBUG_ON = process.env.APP_IS_DEBUG_ON === 'true';
-const docker = new Docker({socketPath: '/var/run/docker.sock'});
+const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+
+// Set up Pino logger
+const logger = pino({
+    level: IS_DEBUG_ON ? 'debug' : 'info',
+});
+
 const app = express();
 app.use(express.json());
+app.use(pinoHttp({ logger }));
 
 docker.ping()
     .then(() => {
-        if (IS_DEBUG_ON) {
-            console.log('Connected to Docker');
-        }
+        logger.info('Connected to Docker');
     })
     .catch((err) => {
-        console.error('Docker ping error:', err);
+        logger.error({ err }, 'Docker ping error');
         process.exit(1);
     });
 
 function publishFeedback(status, message) {
-    const feedback = {status, message};
+    const feedback = { status, message };
+    logger.info({ feedback }, 'Publishing feedback');
     // TODO: do something with feedback
 }
 
 async function createDockerContainer(jobConfig) {
-    const container = await docker.createContainer({
-        Image: 'ghcr.io/puppeteer/puppeteer:22.10.0',
-        Cmd: ['bash', '-c', jobConfig.bashStartUpCmd],
-        HostConfig: {
-            Binds: [`${jobConfig.programDirectory}:/home/pptruser/app:ro`],
-            AutoRemove: true,
-            Init: true,
-            CapAdd: ['SYS_ADMIN'],
-        },
-    });
-
-    if (IS_DEBUG_ON) {
-        console.log('Docker container created.');
+    try {
+        const container = await docker.createContainer({
+            Image: 'ghcr.io/puppeteer/puppeteer:22.10.0',
+            Cmd: ['bash', '-c', jobConfig.bashStartUpCmd],
+            HostConfig: {
+                Binds: [`${jobConfig.programDirectory}:/home/pptruser/app:ro`],
+                AutoRemove: true,
+                Init: true,
+                CapAdd: ['SYS_ADMIN'],
+            },
+        });
+        logger.debug('Docker container created', { jobConfig });
+        return container;
+    } catch (err) {
+        logger.error({ err }, 'Error creating Docker container');
+        throw err;
     }
-
-    return container;
 }
 
 async function startDockerContainer(container) {
-    if (IS_DEBUG_ON) {
-        console.log('Starting Docker container.');
-    }
-
+    logger.debug('Starting Docker container.');
     await container.start();
 }
 
@@ -58,18 +65,8 @@ async function captureContainerResultFromLogs(container) {
             stdoutStream,
             stderrStream,
         ] = await Promise.all([
-            container.attach({
-                stream: true,
-                stdout: true,
-                stderr: false,
-                logs: true
-            }),
-            container.attach({
-                stream: true,
-                stdout: false,
-                stderr: true,
-                logs: true
-            }),
+            container.attach({ stream: true, stdout: true, stderr: false, logs: true }),
+            container.attach({ stream: true, stdout: false, stderr: true, logs: true }),
         ]);
 
         stderrStream.pipe(process.stderr);
@@ -86,48 +83,44 @@ async function captureContainerResultFromLogs(container) {
             });
 
             stdoutStream.on('error', (err) => {
+                logger.error({ err }, 'Error collecting stdout logs');
                 reject(err);
             });
         });
     } catch (err) {
-        console.error('Error attaching to Docker container streams:', err);
+        logger.error({ err }, 'Error attaching to Docker container streams');
+        throw err;
     }
 }
 
 async function waitForContainerToFinish(container) {
     const data = await container.wait();
-
-    if (IS_DEBUG_ON) {
-        console.log('Docker container exited with status:', data.StatusCode);
-    }
+    logger.debug('Docker container exited', { statusCode: data.StatusCode });
 
     if (data.StatusCode === 0) {
         publishFeedback('info', 'Puppeteer script executed successfully.');
     } else {
-        throw new Error(`Puppeteer script execution failed with exit code ${data.StatusCode}`);
+        const errorMsg = `Puppeteer script execution failed with exit code ${data.StatusCode}`;
+        logger.error(errorMsg);
+        throw new Error(errorMsg);
     }
 }
 
 function handleImageNotFoundThenRetry(jobParams) {
-    if (IS_DEBUG_ON) {
-        console.log('Image not found locally, pulling image from registry.');
-    }
+    logger.debug('Image not found locally, pulling from registry.');
 
     return new Promise(async function pullAndRetry(resolve, reject) {
         function onFinished(err) {
             if (err) {
-                console.error('Error pulling Docker image:', err);
+                logger.error({ err }, 'Error pulling Docker image');
                 publishFeedback('error', `Failed to pull Docker image: ${err.message}`);
-                return;
+                return reject(err);
             }
-            // Retry creating and starting the container
             resolve(runDockerCommand(jobParams));
         }
 
         function onProgress(event) {
-            if (IS_DEBUG_ON) {
-                console.log('Docker pull progress:', event);
-            }
+            logger.debug('Docker pull progress', { event });
         }
 
         try {
@@ -138,6 +131,7 @@ function handleImageNotFoundThenRetry(jobParams) {
                 docker.modem.followProgress(stream, onFinished, onProgress);
             });
         } catch (err) {
+            logger.error({ err }, 'Error during Docker pull');
             reject(err);
         }
     });
@@ -175,13 +169,13 @@ async function runDockerCommand(jobParams) {
         if (err.statusCode === 404 && err.json && err.json.message.includes('No such image')) {
             return await handleImageNotFoundThenRetry(jobConfig);
         } else {
+            logger.error({ err }, 'Error running Docker command');
             throw err;
         }
     }
 }
 
 function validateParams(params) {
-
     function isValidPartialPath(userInputPath) {
         try {
             const realBaseDir = fs.realpathSync(BASE_PATH_FOR_SCRIPTS);
@@ -203,33 +197,37 @@ function validateParams(params) {
         }
 
         if (!isValidPartialPath(params.programDirectory)) {
-            error = 'Error: Invalid program directory, what are you trying to do Mr. Hacker?';
+            error = 'Error: Invalid program directory';
             break validations;
         }
     }
 
-    return {isValid: !error, error};
+    return { isValid: !error, error };
 }
 
 async function startScrapperJob(req, res) {
     const params = req.body;
-
-    if (IS_DEBUG_ON) {
-        console.log('Received HTTP request with params:', params);
-    }
+    logger.info('Received HTTP request', { params });
 
     const validationResult = validateParams(params);
     if (!validationResult.isValid) {
-        return res.status(400).json({status: 'error', message: validationResult.error});
+        logger.warn('Validation failed', { error: validationResult.error });
+        return res.status(400).json({ status: 'error', message: validationResult.error });
     }
 
     try {
         const result = await runDockerCommand(params);
+        logger.info('Scrapper job completed successfully');
         return res.status(200).json(result);
     } catch (err) {
-        console.error('Failed to execute Docker command:', err);
-        return res.status(500).json({status: 'error', message: `Puppeteer script execution failed: ${err.message}`});
+        logger.error({ err }, 'Failed to execute Docker command');
+        return res.status(500).json({ status: 'error', message: `Puppeteer script execution failed: ${err.message}` });
     }
 }
 
 app.post('/start-scrapper-job', startScrapperJob);
+
+const PORT = process.env.APP_PORT || 3646;
+app.listen(PORT, () => {
+    logger.info(`Server is running on port ${PORT}`);
+});
