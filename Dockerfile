@@ -3,6 +3,7 @@ FROM node:20-alpine
 ENV NODE_ENV=production
 ENV APP_PATH_FOR_SCRIPTS="/home/on-demand-scraping/scripts"
 ENV APP_IS_DEBUG_ON="false"
+ENV APP_PORT="3646"
 
 RUN apk add --no-cache tini
 
