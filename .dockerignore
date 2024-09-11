@@ -1,0 +1,12 @@
+.DS_Store
+.dockerignore
+.env
+.git
+.gitignore
+.nvmrc
+Dockerfile
+Thumbs.db
+docker-compose.yml
+node_modules
+npm-debug.log
+npm-debug.log
